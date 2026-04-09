@@ -1,0 +1,125 @@
+#include <BluetoothSerial.h>
+#include <HardwareSerial.h>
+
+BluetoothSerial SerialBT;
+HardwareSerial gsm(2);
+
+const int FLAME_SENSOR = 34;
+const int IR_IN = 18;
+const int IR_OUT = 19;
+const int BUZZER = 15;
+
+int peopleCount = 0;
+bool fireDetected = false;
+bool fireMsgSent = false;
+int flameThreshold = 2000;
+
+enum BeamHit {
+NONE_HIT,
+IN_HIT_FIRST,
+OUT_HIT_FIRST
+};
+
+BeamHit lastBeam = NONE_HIT;
+
+unsigned long lastStateChange = 0;
+const unsigned long SEQUENCE_TIMEOUT_MS = 2000;
+
+void sendSMS(String msg) {
+  gsm.println("AT+CMGF=1");
+  delay(1000);
+  gsm.println("AT+CMGS=\"+919345025458\"");
+  delay(1000);
+  gsm.print(msg);
+  delay(100);
+  gsm.write(26);
+  delay(3000);
+}
+
+void updateCount(const char* direction) {
+  if (peopleCount < 0) peopleCount = 0;
+
+  Serial.print("Count Updated: ");
+  Serial.print(direction);
+  Serial.print(" | People in room: ");
+  Serial.println(peopleCount);
+
+  SerialBT.print("Count Updated: ");
+  SerialBT.print(direction);
+  SerialBT.print(" | People in room: ");
+  SerialBT.println(peopleCount);
+}
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("ESP32_Classroom");
+  gsm.begin(9600, SERIAL_8N1, 16, 17);
+
+  pinMode(IR_IN, INPUT_PULLUP);
+  pinMode(IR_OUT, INPUT_PULLUP);
+  pinMode(BUZZER, OUTPUT);
+
+  digitalWrite(BUZZER, LOW);
+
+  SerialBT.println("ESP32 started");
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  int flameValue = analogRead(FLAME_SENSOR);
+
+  if (flameValue < flameThreshold) {
+    digitalWrite(BUZZER, HIGH);
+
+    if (!fireDetected) {
+      fireDetected = true;
+
+      if (!fireMsgSent) {
+        String msg = "FIRE ALERT! People inside: " + String(peopleCount);
+
+        Serial.println(msg);
+        SerialBT.println(msg);
+
+        sendSMS(msg);
+
+        fireMsgSent = true;
+      }
+    }
+  } else {
+    digitalWrite(BUZZER, LOW);
+    fireDetected = false;
+    fireMsgSent = false;
+  }
+
+  bool in_broken = digitalRead(IR_IN) == LOW;
+  bool out_broken = digitalRead(IR_OUT) == LOW;
+
+  if (lastBeam != NONE_HIT && now - lastStateChange > SEQUENCE_TIMEOUT_MS) {
+    lastBeam = NONE_HIT;
+  }
+
+  if (in_broken && !out_broken) {
+    if (lastBeam == OUT_HIT_FIRST) {
+      if (peopleCount > 0) peopleCount--;
+      lastBeam = NONE_HIT;
+      updateCount("Exit");
+    } else if (lastBeam == NONE_HIT) {
+      lastBeam = IN_HIT_FIRST;
+      lastStateChange = now;
+    }
+  } 
+  else if (out_broken && !in_broken) {
+    if (lastBeam == IN_HIT_FIRST) {
+      peopleCount++;
+      lastBeam = NONE_HIT;
+      updateCount("Entry");
+    } 
+    else if (lastBeam == NONE_HIT) {
+      lastBeam = OUT_HIT_FIRST;
+      lastStateChange = now;
+    }
+  }
+
+  delay(50);
+}
